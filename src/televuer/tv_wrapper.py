@@ -102,6 +102,13 @@ T_TO_UNITREE_HAND = np.array([[0,  0, 1, 0],
                               [0, -1, 0, 0],
                               [0,  0, 0, 1]])
 
+# (initial pose) Acupuncture robot tool/tip convention (controller tracking)
+# Similar to T_TO_UNITREE_HAND: used as a fixed right-multiply to convert
+# controller-provided wrist/tool pose into the Acu robot's tip/tool convention
+# under (basis) Robot Convention.
+# TODO: Adjust this matrix based on the Acu tool frame definition.
+T_TO_ACUROBOT_TIP = T_TO_UNITREE_HAND.copy()
+
 T_ROBOT_OPENXR = np.array([[ 0, 0,-1, 0],
                            [-1, 0, 0, 0],
                            [ 0, 1, 0, 0],
@@ -182,7 +189,7 @@ class TeleData:
 
 class TeleVuerWrapper:
     def __init__(self, binocular: bool, use_hand_tracking: bool, img_shape, img_shm_name, return_state_data: bool = True, return_hand_rot_data: bool = False,
-                       cert_file = None, key_file = None, ngrok = False, webrtc = False):
+                       cert_file = None, key_file = None, ngrok = False, webrtc = False, use_acu_controller_teleop: bool=False,):
         """
         TeleVuerWrapper is a wrapper for the TeleVuer class, which handles XR device's data suit for robot control.
         It initializes the TeleVuer instance with the specified parameters and provides a method to get motion state data.
@@ -199,6 +206,7 @@ class TeleVuerWrapper:
         self.use_hand_tracking = use_hand_tracking
         self.return_state_data = return_state_data
         self.return_hand_rot_data = return_hand_rot_data
+        self.use_acu_controller_teleop = use_acu_controller_teleop
         self.tvuer = TeleVuer(binocular, use_hand_tracking, img_shape, img_shm_name, cert_file=cert_file, key_file=key_file,
                                 ngrok=ngrok, webrtc=webrtc)
     
@@ -351,6 +359,56 @@ class TeleVuerWrapper:
                 tele_state=hand_state
             )
         else:
+            # If enabled, use Acu controller mapping.
+            # Keep existing Unitree controller path unchanged.
+            if getattr(self, 'use_acu_controller_teleop', False):
+                # Controller pose data is under (basis) OpenXR Convention and typically follows Unitree Arm URDF convention.
+                # For Acu, we additionally convert to the Acu tool/tip convention.
+                left_IPxr_Bxr_world_arm, left_arm_is_valid = safe_mat_update(CONST_LEFT_ARM_POSE, self.tvuer.left_arm_pose)
+                right_IPxr_Bxr_world_arm, right_arm_is_valid = safe_mat_update(CONST_RIGHT_ARM_POSE, self.tvuer.right_arm_pose)
+
+                # Change basis convention: OpenXR -> Robot
+                Brobot_world_head = T_ROBOT_OPENXR @ Bxr_world_head @ T_OPENXR_ROBOT
+                left_IPacubot_Brobot_world_arm = T_ROBOT_OPENXR @ left_IPxr_Bxr_world_arm @ T_OPENXR_ROBOT
+                right_IPacubot_Brobot_world_arm = T_ROBOT_OPENXR @ right_IPxr_Bxr_world_arm @ T_OPENXR_ROBOT
+
+                # Change initial pose convention for Acu tool/tip (controller -> Acu tip)
+                left_IPacu_Brobot_world_arm = left_IPacubot_Brobot_world_arm @ (T_TO_ACUROBOT_TIP if left_arm_is_valid else np.eye(4))
+                right_IPacu_Brobot_world_arm = right_IPacubot_Brobot_world_arm @ (T_TO_ACUROBOT_TIP if right_arm_is_valid else np.eye(4))
+
+                # Transfer from WORLD to HEAD coordinate (translation adjustment only)
+                left_IPacu_Brobot_head_arm = left_IPacu_Brobot_world_arm.copy()
+                right_IPacu_Brobot_head_arm = right_IPacu_Brobot_world_arm.copy()
+                left_IPacu_Brobot_head_arm[0:3, 3] = left_IPacu_Brobot_head_arm[0:3, 3] - Brobot_world_head[0:3, 3]
+                right_IPacu_Brobot_head_arm[0:3, 3] = right_IPacu_Brobot_head_arm[0:3, 3] - Brobot_world_head[0:3, 3]
+
+                # IMPORTANT: do NOT align origin to waist in Acu mode; keep head-frame outputs.
+                left_wrist_pose = left_IPacu_Brobot_head_arm
+                right_wrist_pose = right_IPacu_Brobot_head_arm
+
+                return TeleData(
+                    head_pose=Brobot_world_head,
+                    left_wrist_pose=left_wrist_pose,
+                    right_wrist_pose=right_wrist_pose,
+                    # keep TeleData full (controller fields)
+                    left_ctrl_trigger=self.tvuer.left_ctrl_trigger,
+                    left_ctrl_triggerValue=10.0 - self.tvuer.left_ctrl_triggerValue * 10,
+                    left_ctrl_squeeze=self.tvuer.left_ctrl_squeeze,
+                    left_ctrl_squeezeValue=self.tvuer.left_ctrl_squeezeValue,
+                    left_ctrl_aButton=self.tvuer.left_ctrl_aButton,
+                    left_ctrl_bButton=self.tvuer.left_ctrl_bButton,
+                    left_ctrl_thumbstick=self.tvuer.left_ctrl_thumbstick,
+                    left_ctrl_thumbstickValue=self.tvuer.left_ctrl_thumbstickValue,
+                    right_ctrl_trigger=self.tvuer.right_ctrl_trigger,
+                    right_ctrl_triggerValue=10.0 - self.tvuer.right_ctrl_triggerValue * 10,
+                    right_ctrl_squeeze=self.tvuer.right_ctrl_squeeze,
+                    right_ctrl_squeezeValue=self.tvuer.right_ctrl_squeezeValue,
+                    right_ctrl_aButton=self.tvuer.right_ctrl_aButton,
+                    right_ctrl_bButton=self.tvuer.right_ctrl_bButton,
+                    right_ctrl_thumbstick=self.tvuer.right_ctrl_thumbstick,
+                    right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue,
+                )
+
             # Controller pose data directly follows the (initial pose) Unitree Humanoid Arm URDF Convention (thus no transform is needed).
             left_IPunitree_Bxr_world_arm, left_arm_is_valid  = safe_mat_update(CONST_LEFT_ARM_POSE, self.tvuer.left_arm_pose)
             right_IPunitree_Bxr_world_arm, right_arm_is_valid = safe_mat_update(CONST_RIGHT_ARM_POSE, self.tvuer.right_arm_pose)
