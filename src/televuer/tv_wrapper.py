@@ -107,7 +107,11 @@ T_TO_UNITREE_HAND = np.array([[0,  0, 1, 0],
 # controller-provided wrist/tool pose into the Acu robot's tip/tool convention
 # under (basis) Robot Convention.
 # TODO: Adjust this matrix based on the Acu tool frame definition.
-T_TO_ACUROBOT_TIP = T_TO_UNITREE_HAND.copy()
+T_TO_ACUROBOT_TIP = np.array([[1,  0, 0, 0],
+                                [0, -1, 0, 0],
+                                [0, 0, -1, 0],
+                                [0,  0, 0, 1]])
+
 
 T_ROBOT_OPENXR = np.array([[ 0, 0,-1, 0],
                            [-1, 0, 0, 0],
@@ -386,27 +390,35 @@ class TeleVuerWrapper:
                 left_wrist_pose = left_IPacu_Brobot_head_arm
                 right_wrist_pose = right_IPacu_Brobot_head_arm
 
+                # return data
+                if self.return_state_data:
+                    controller_state = TeleStateData(
+                        left_trigger_state=self.tvuer.left_controller_trigger_state,
+                        left_squeeze_ctrl_state=self.tvuer.left_controller_squeeze_state,
+                        left_squeeze_ctrl_value=self.tvuer.left_controller_squeeze_value,
+                        left_thumbstick_state=self.tvuer.left_controller_thumbstick_state,
+                        left_thumbstick_value=self.tvuer.left_controller_thumbstick_value,
+                        left_aButton=self.tvuer.left_controller_aButton,
+                        left_bButton=self.tvuer.left_controller_bButton,
+                        right_trigger_state=self.tvuer.right_controller_trigger_state,
+                        right_squeeze_ctrl_state=self.tvuer.right_controller_squeeze_state,
+                        right_squeeze_ctrl_value=self.tvuer.right_controller_squeeze_value,
+                        right_thumbstick_state=self.tvuer.right_controller_thumbstick_state,
+                        right_thumbstick_value=self.tvuer.right_controller_thumbstick_value,
+                        right_aButton=self.tvuer.right_controller_aButton,
+                        right_bButton=self.tvuer.right_controller_bButton,
+                    )
+                else:
+                    controller_state = None
+
                 return TeleData(
                     head_pose=Brobot_world_head,
-                    left_wrist_pose=left_wrist_pose,
-                    right_wrist_pose=right_wrist_pose,
+                    left_arm_pose=left_wrist_pose,
+                    right_arm_pose=right_wrist_pose,
                     # keep TeleData full (controller fields)
-                    left_ctrl_trigger=self.tvuer.left_ctrl_trigger,
-                    left_ctrl_triggerValue=10.0 - self.tvuer.left_ctrl_triggerValue * 10,
-                    left_ctrl_squeeze=self.tvuer.left_ctrl_squeeze,
-                    left_ctrl_squeezeValue=self.tvuer.left_ctrl_squeezeValue,
-                    left_ctrl_aButton=self.tvuer.left_ctrl_aButton,
-                    left_ctrl_bButton=self.tvuer.left_ctrl_bButton,
-                    left_ctrl_thumbstick=self.tvuer.left_ctrl_thumbstick,
-                    left_ctrl_thumbstickValue=self.tvuer.left_ctrl_thumbstickValue,
-                    right_ctrl_trigger=self.tvuer.right_ctrl_trigger,
-                    right_ctrl_triggerValue=10.0 - self.tvuer.right_ctrl_triggerValue * 10,
-                    right_ctrl_squeeze=self.tvuer.right_ctrl_squeeze,
-                    right_ctrl_squeezeValue=self.tvuer.right_ctrl_squeezeValue,
-                    right_ctrl_aButton=self.tvuer.right_ctrl_aButton,
-                    right_ctrl_bButton=self.tvuer.right_ctrl_bButton,
-                    right_ctrl_thumbstick=self.tvuer.right_ctrl_thumbstick,
-                    right_ctrl_thumbstickValue=self.tvuer.right_ctrl_thumbstickValue,
+                    left_trigger_value=10.0 - self.tvuer.left_controller_trigger_value * 10,
+                    right_trigger_value=10.0 - self.tvuer.right_controller_trigger_value * 10,
+                    tele_state=controller_state
                 )
 
             # Controller pose data directly follows the (initial pose) Unitree Humanoid Arm URDF Convention (thus no transform is needed).
