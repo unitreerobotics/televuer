@@ -86,6 +86,16 @@ def safe_rot_update(prev_rot_array, rot_array):
         return prev_rot_array, False
     return rot_array, True
 
+def _rot_y(rad: float) -> np.ndarray:
+    """4x4 homogeneous rotation about local +Y axis (right-handed)."""
+    c, s = np.cos(rad), np.sin(rad)
+    return np.array([
+        [ c, 0.0,  s, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [-s, 0.0,  c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ], dtype=float)
+
 # constants variable
 T_TO_UNITREE_HUMANOID_LEFT_ARM = np.array([[1, 0, 0, 0],
                                            [0, 0,-1, 0],
@@ -112,6 +122,19 @@ T_TO_ACUROBOT_TIP = np.array([[1,  0, 0, 0],
                                 [0, 0, -1, 0],
                                 [0,  0, 0, 1]])
 
+T_WRIST_TO_ACUROBOT_TIP = np.array([[1,  0, 0, 0],
+                                    [0, 0, -1, 0],
+                                    [0, 1, 0, 0],
+                                    [0,  0, 0, 1]])
+
+# Hand points (hand tracking) -> AcuRobot tip/tool convention.
+# As requested: rotate around local y-axis by a certain angle, then apply the fixed transform.
+HAND_TO_ACUROBOT_TIP_YAW_RAD = 0.0  # TODO: set desired angle (radians), e.g. np.deg2rad(30)
+_T_HAND_TO_ACUROBOT_TIP_FIXED = np.array([[0,  -1, 0, 0],
+                                          [0,   0,-1, 0],
+                                          [1,   0, 0, 0],
+                                          [0,   0, 0, 1]], dtype=float)
+T_HAND_TO_ACUROBOT_TIP = _rot_y(HAND_TO_ACUROBOT_TIP_YAW_RAD) @ _T_HAND_TO_ACUROBOT_TIP_FIXED
 
 T_ROBOT_OPENXR = np.array([[ 0, 0,-1, 0],
                            [-1, 0, 0, 0],
@@ -193,7 +216,7 @@ class TeleData:
 
 class TeleVuerWrapper:
     def __init__(self, binocular: bool, use_hand_tracking: bool, img_shape, img_shm_name, return_state_data: bool = True, return_hand_rot_data: bool = False,
-                       cert_file = None, key_file = None, ngrok = False, webrtc = False, use_acu_controller_teleop: bool=False,):
+                       cert_file = None, key_file = None, ngrok = False, webrtc = False, use_acu_controller_teleop: bool=False, use_acu_hand_teleop: bool=False):
         """
         TeleVuerWrapper is a wrapper for the TeleVuer class, which handles XR device's data suit for robot control.
         It initializes the TeleVuer instance with the specified parameters and provides a method to get motion state data.
@@ -211,6 +234,7 @@ class TeleVuerWrapper:
         self.return_state_data = return_state_data
         self.return_hand_rot_data = return_hand_rot_data
         self.use_acu_controller_teleop = use_acu_controller_teleop
+        self.use_acu_hand_teleop = use_acu_hand_teleop
         self.tvuer = TeleVuer(binocular, use_hand_tracking, img_shape, img_shm_name, cert_file=cert_file, key_file=key_file,
                                 ngrok=ngrok, webrtc=webrtc)
     
@@ -236,6 +260,118 @@ class TeleVuerWrapper:
         Bxr_world_head, head_pose_is_valid = safe_mat_update(CONST_HEAD_POSE, self.tvuer.head_pose)
 
         if self.use_hand_tracking:
+            # If enabled, use Acu controller mapping.
+            # Keep existing Unitree controller path unchanged.
+            if getattr(self, 'use_acu_hand_teleop', False):
+                left_IPxr_Bxr_world_arm, left_arm_is_valid  = safe_mat_update(CONST_LEFT_ARM_POSE, self.tvuer.left_arm_pose)
+                right_IPxr_Bxr_world_arm, right_arm_is_valid = safe_mat_update(CONST_RIGHT_ARM_POSE, self.tvuer.right_arm_pose)
+                if not right_arm_is_valid:
+                    print("Warning: right arm pose is invalid!")
+                
+                Brobot_world_head = T_ROBOT_OPENXR @ Bxr_world_head @ T_OPENXR_ROBOT
+                left_IPxr_Brobot_world_arm  = T_ROBOT_OPENXR @ left_IPxr_Bxr_world_arm @ T_OPENXR_ROBOT
+                right_IPxr_Brobot_world_arm = T_ROBOT_OPENXR @ right_IPxr_Bxr_world_arm @ T_OPENXR_ROBOT
+
+                # Change initial pose convention 
+                # From (initial pose) OpenXR Arm Convention to (initial pose) Unitree Humanoid Arm URDF Convention
+                # Reason for right multiply (T_WRIST_TO_ACUROBOT_TIP): Rotate 90 degrees counterclockwise about its own x-axis.
+                left_IPacu_Brobot_world_arm = left_IPxr_Brobot_world_arm @ (T_WRIST_TO_ACUROBOT_TIP if left_arm_is_valid else np.eye(4))
+                right_IPacu_Brobot_world_arm = right_IPxr_Brobot_world_arm @ (T_WRIST_TO_ACUROBOT_TIP if right_arm_is_valid else np.eye(4))
+
+                # Transfer from WORLD to HEAD coordinate (translation adjustment only)
+                left_IPacu_Brobot_head_arm = left_IPacu_Brobot_world_arm.copy()
+                right_IPacu_Brobot_head_arm = right_IPacu_Brobot_world_arm.copy()
+                left_IPacu_Brobot_head_arm[0:3, 3]  = left_IPacu_Brobot_head_arm[0:3, 3] - Brobot_world_head[0:3, 3]
+                right_IPacu_Brobot_head_arm[0:3, 3] = right_IPacu_Brobot_head_arm[0:3, 3] - Brobot_world_head[0:3, 3]
+
+                # -----------------------------------hand position----------------------------------------
+                if left_arm_is_valid and right_arm_is_valid:
+                    # Homogeneous, [xyz] to [xyz1]
+                    #   np.concatenate([25,3]^T,(1,25)) ==> Bxr_world_hand_pos.shape is (4,25)
+                    # Now under (basis) OpenXR Convention, Bxr_world_hand_pos data like this:
+                    #    [x0 x1 x2 ··· x23 x24]
+                    #    [y0 y1 y1 ··· y23 y24]
+                    #    [z0 z1 z2 ··· z23 z24]
+                    #    [ 1  1  1 ···  1    1]
+                    left_IPxr_Bxr_world_hand_pos  = np.concatenate([self.tvuer.left_hand_positions.T, np.ones((1, self.tvuer.left_hand_positions.shape[0]))])
+                    right_IPxr_Bxr_world_hand_pos = np.concatenate([self.tvuer.right_hand_positions.T, np.ones((1, self.tvuer.right_hand_positions.shape[0]))])
+
+                    # Change basis convention
+                    # From (basis) OpenXR Convention to (basis) Robot Convention
+                    # Just a change of basis for 3D points. No rotation, only translation. So, no need to right-multiply fast_mat_inv(T_ROBOT_OPENXR).
+                    left_IPxr_Brobot_world_hand_pos  = T_ROBOT_OPENXR @ left_IPxr_Bxr_world_hand_pos
+                    right_IPxr_Brobot_world_hand_pos = T_ROBOT_OPENXR @ right_IPxr_Bxr_world_hand_pos
+
+                    # Transfer from WORLD to HEAD coordinate (translation adjustment only)
+                    # NOTE: *_hand_pos is (4, 25), so subtract head translation from ALL points.
+                    left_IPxr_Brobot_head_hand_pos  = left_IPxr_Brobot_world_hand_pos.copy()
+                    right_IPxr_Brobot_head_hand_pos = right_IPxr_Brobot_world_hand_pos.copy()
+                    # Make translation a column vector (3,1) so it broadcasts over 25 points (3,25).
+                    head_t = Brobot_world_head[0:3, 3:4]
+                    left_IPxr_Brobot_head_hand_pos[0:3, :]  -= head_t
+                    right_IPxr_Brobot_head_hand_pos[0:3, :] -= head_t
+
+                    # Change initial pose convention
+                    # From (initial pose) XR Hand Convention to (initial pose) ACU ROBOT URDF Convention:
+                    #   T_HAND_TO_ACUROBOT_TIP @ IPxr_Brobot_head_hand_pos ==> IPacu_Brobot_head_hand_pos
+                    #   ((4,4) @ (4,25))[0:3, :].T ==> (4,25)[0:3, :].T ==> (3,25).T ==> (25,3)           
+                    # Now under (initial pose) Unitree Humanoid Hand URDF Convention, matrix shape like this:
+                    #    [x0, y0, z0]
+                    #    [x1, y1, z1]
+                    #    ···
+                    #    [x23,y23,z23]
+                    #    [x24,y24,z24]
+                    # left_IPacu_Brobot_head_hand_pos  = (T_HAND_TO_ACUROBOT_TIP @ left_IPxr_Brobot_head_hand_pos)[0:3, :].T
+                    # right_IPacu_Brobot_head_hand_pos = (T_HAND_TO_ACUROBOT_TIP @ right_IPxr_Brobot_head_hand_pos)[0:3, :].T
+                    left_IPacu_Brobot_head_hand_pos  = left_IPxr_Brobot_head_hand_pos[0:3, :].T
+                    right_IPacu_Brobot_head_hand_pos = right_IPxr_Brobot_head_hand_pos[0:3, :].T
+                else:
+                    left_IPacu_Brobot_head_hand_pos  = np.zeros((25, 3))
+                    right_IPacu_Brobot_head_hand_pos = np.zeros((25, 3))
+                
+                # -----------------------------------hand rotation----------------------------------------
+                if self.return_hand_rot_data:
+                    left_Bxr_world_hand_rot, left_hand_rot_is_valid  = safe_rot_update(CONST_HAND_ROT, self.tvuer.left_hand_orientations) # [25, 3, 3]
+                    right_Bxr_world_hand_rot, right_hand_rot_is_valid = safe_rot_update(CONST_HAND_ROT, self.tvuer.right_hand_orientations)
+
+                    if left_hand_rot_is_valid and right_hand_rot_is_valid:
+                        left_Bxr_arm_hand_rot = np.einsum('ij,njk->nik', left_IPxr_Bxr_world_arm[:3, :3].T, left_Bxr_world_hand_rot)
+                        right_Bxr_arm_hand_rot = np.einsum('ij,njk->nik', right_IPxr_Bxr_world_arm[:3, :3].T, right_Bxr_world_hand_rot)
+                        # Change basis convention
+                        left_Brobot_arm_hand_rot = np.einsum('ij,njk,kl->nil', R_ROBOT_OPENXR, left_Bxr_arm_hand_rot, R_OPENXR_ROBOT)
+                        right_Brobot_arm_hand_rot = np.einsum('ij,njk,kl->nil', R_ROBOT_OPENXR, right_Bxr_arm_hand_rot, R_OPENXR_ROBOT)
+                    else:
+                        left_Brobot_arm_hand_rot = left_Bxr_world_hand_rot
+                        right_Brobot_arm_hand_rot = right_Bxr_world_hand_rot
+                else:
+                    left_Brobot_arm_hand_rot = None
+                    right_Brobot_arm_hand_rot = None
+                
+                if self.return_state_data:
+                    hand_state = TeleStateData(
+                        left_pinch_state=self.tvuer.left_hand_pinch_state,
+                        left_squeeze_state=self.tvuer.left_hand_squeeze_state,
+                        left_squeeze_value=self.tvuer.left_hand_squeeze_value,
+                        right_pinch_state=self.tvuer.right_hand_pinch_state,
+                        right_squeeze_state=self.tvuer.right_hand_squeeze_state,
+                        right_squeeze_value=self.tvuer.right_hand_squeeze_value,
+                    )
+                else:
+                    hand_state = None
+
+                return TeleData(
+                    head_pose=Brobot_world_head,
+                    left_arm_pose=left_IPacu_Brobot_head_arm,
+                    right_arm_pose=right_IPacu_Brobot_head_arm,
+                    left_hand_pos=left_IPacu_Brobot_head_hand_pos,
+                    right_hand_pos=right_IPacu_Brobot_head_hand_pos,
+                    left_hand_rot=left_Brobot_arm_hand_rot,
+                    right_hand_rot=right_Brobot_arm_hand_rot,
+                    left_pinch_value=self.tvuer.left_hand_pinch_value * 100.0,
+                    right_pinch_value=self.tvuer.right_hand_pinch_value * 100.0,
+                    tele_state=hand_state
+                )
+
             # 'Arm' pose data follows (basis) OpenXR Convention and (initial pose) OpenXR Arm Convention.
             left_IPxr_Bxr_world_arm, left_arm_is_valid  = safe_mat_update(CONST_LEFT_ARM_POSE, self.tvuer.left_arm_pose)
             right_IPxr_Bxr_world_arm, right_arm_is_valid = safe_mat_update(CONST_RIGHT_ARM_POSE, self.tvuer.right_arm_pose)
