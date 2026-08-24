@@ -92,8 +92,12 @@ class TeleVuer:
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
         if self.use_hand_tracking:
             self.vuer.add_handler("HAND_MOVE")(self.on_hand_move)
-        else:
-            self.vuer.add_handler("CONTROLLER_MOVE")(self.on_controller_move)
+        # Always register CONTROLLER_MOVE, even in hand-tracking mode: this lets Quest 3
+        # controller buttons (A/B/X/Y, trigger, squeeze, thumbstick) keep reporting state for
+        # state-machine control (READY/Recording/Quit) while hand tracking still drives wrist
+        # pose. on_controller_move() below skips its arm-pose writes when use_hand_tracking is
+        # True, so it never fights with on_hand_move()'s pose writes.
+        self.vuer.add_handler("CONTROLLER_MOVE")(self.on_controller_move)
 
         self.display_mode = display_mode
         self.zmq = zmq
@@ -229,11 +233,14 @@ class TeleVuer:
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
         try:
-            # ControllerData
-            with self.left_arm_pose_shared.get_lock():
-                self.left_arm_pose_shared[:] = event.value["left"]
-            with self.right_arm_pose_shared.get_lock():
-                self.right_arm_pose_shared[:] = event.value["right"]
+            # ControllerData. Skip when hand tracking owns wrist pose, so this handler (now
+            # always registered, to also catch button presses in hand-tracking mode) never
+            # overwrites the arm pose that on_hand_move() is driving.
+            if not self.use_hand_tracking:
+                with self.left_arm_pose_shared.get_lock():
+                    self.left_arm_pose_shared[:] = event.value["left"]
+                with self.right_arm_pose_shared.get_lock():
+                    self.right_arm_pose_shared[:] = event.value["right"]
             # ControllerState
             left_controller = event.value["leftState"]
             right_controller = event.value["rightState"]

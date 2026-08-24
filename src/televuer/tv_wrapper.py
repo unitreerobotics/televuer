@@ -412,6 +412,13 @@ class TeleVuerWrapper:
                 right_hand_pinchValue=self.tvuer.right_hand_pinchValue * 100.0,
                 right_hand_squeeze=self.tvuer.right_hand_squeeze,
                 right_hand_squeezeValue=self.tvuer.right_hand_squeezeValue,
+                # Controller face buttons, forwarded even though wrist pose comes from hand
+                # tracking here. Requires the patched TeleVuer.on_controller_move (always
+                # registers CONTROLLER_MOVE) so these shared values keep updating in hand mode.
+                left_ctrl_aButton=self.tvuer.left_ctrl_aButton,
+                left_ctrl_bButton=self.tvuer.left_ctrl_bButton,
+                right_ctrl_aButton=self.tvuer.right_ctrl_aButton,
+                right_ctrl_bButton=self.tvuer.right_ctrl_bButton,
             )
         # controller tracking
         else:
