@@ -8,6 +8,8 @@ import cv2
 import os
 from pathlib import Path
 from typing import Literal
+from aiohttp import web
+from aiohttp.hdrs import UPGRADE
 
 
 class TeleVuer:
@@ -177,10 +179,61 @@ class TeleVuer:
             self.right_ctrl_aButton_shared = Value('b', False, lock=True)
             self.right_ctrl_bButton_shared = Value('b', False, lock=True)
 
+        self._enable_full_viewport_vr_button()
+
         self.process = Process(target=self._vuer_run)
         self.process.daemon = True
         self.process.start()
-    
+
+    def _enable_full_viewport_vr_button(self):
+        """Make the "ENTER VR" button (three.js's VRButton, id="VRButton") cover the whole
+        viewport instead of a small pill near the bottom, so entering VR is "tap anywhere on
+        the loaded page" rather than "find and tap a specific small button". Purely a CSS
+        override injected into index.html's <head> -- the click/session-request JS itself
+        (bundled, unmodified, inside the `vuer` pip package) is never touched.
+
+        Vuer.run() (called later, inside the child process by _vuer_run) does
+        `self._add_route("", self.socket_index, method="GET")` -- registering a *second*
+        resource for the same path+method raises aiohttp.web's "Added route will never be
+        executed" error, so we can't just add our own route alongside it. Instead, shadow the
+        bound method itself: assign an instance attribute `self.vuer.socket_index` here, before
+        self.process.start() (default Linux multiprocessing start method is fork, so this
+        carries into the child) -- an instance attribute shadows the class method, so when
+        run() later reads `self.socket_index` it picks up ours, and registers *our* function as
+        the one-and-only handler. Websocket upgrades are detected the same way vuer's own
+        socket_index() does and handed straight to the original, so the control/pose data path
+        is completely unaffected.
+
+        If anything about this (a future `vuer` version, an unexpected index.html shape) isn't
+        as expected, log and fall back to vuer's own default route rather than breaking startup.
+        """
+        try:
+            index_path = Path(self.vuer.client_root) / "index.html"
+            original_html = index_path.read_text()
+            style_override = (
+                "<style>#VRButton{position:fixed !important;inset:0 !important;"
+                "left:0 !important;top:0 !important;bottom:auto !important;right:auto !important;"
+                "width:100vw !important;height:100vh !important;font-size:8vw !important;"
+                "display:flex !important;align-items:center;justify-content:center;}</style>"
+            )
+            if "</head>" not in original_html:
+                raise ValueError("index.html has no </head> to inject into")
+            patched_index_html = original_html.replace("</head>", style_override + "</head>", 1)
+        except Exception as e:
+            print(f"[TeleVuer] Warning: could not prepare full-viewport VRButton override, "
+                  f"falling back to the default small button: {e}")
+            return
+
+        original_socket_index = self.vuer.socket_index
+
+        async def patched_socket_index(request):
+            headers = request.headers
+            if headers.get(UPGRADE, "").lower().strip() == "websocket":
+                return await original_socket_index(request)
+            return web.Response(text=patched_index_html, content_type="text/html")
+
+        self.vuer.socket_index = patched_socket_index
+
     def _vuer_run(self):
         try:
             self.vuer.run()
