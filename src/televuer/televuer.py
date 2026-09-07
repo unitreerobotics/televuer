@@ -270,11 +270,8 @@ class TeleVuer:
     async def on_hand_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/19_hand_tracking.html"""
         try:
-            # HandsData
-            left_hand_data = event.value["left"]
-            right_hand_data = event.value["right"]
-            left_hand = event.value["leftState"]
-            right_hand = event.value["rightState"]
+            if not isinstance(event.value, dict):
+                return
             # HandState
             def extract_hand_poses(hand_data, arm_pose_shared, hand_position_shared, hand_orientation_shared):
                 with arm_pose_shared.get_lock():
@@ -306,12 +303,34 @@ class TeleVuer:
                 with getattr(self, f"{prefix}_hand_squeezeValue_shared").get_lock():
                     getattr(self, f"{prefix}_hand_squeezeValue_shared").value = float(handState.get("squeezeValue", 0.0))
 
-            extract_hand_poses(left_hand_data, self.left_arm_pose_shared, self.left_hand_position_shared, self.left_hand_orientation_shared)
-            extract_hand_poses(right_hand_data, self.right_arm_pose_shared, self.right_hand_position_shared, self.right_hand_orientation_shared)
-            extract_hands(left_hand, "left")
-            extract_hands(right_hand, "right")
-            with self.motion_data_ready_shared.get_lock():
-                self.motion_data_ready_shared.value = True
+            updated = False
+            for prefix in ("left", "right"):
+                try:
+                    hand_data = np.asarray(event.value.get(prefix), dtype=float)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    hand_data.shape != (25 * 16,)
+                    or not np.isfinite(hand_data).all()
+                    or np.isclose(np.linalg.det(hand_data[:16].reshape(4, 4)), 0.0)
+                ):
+                    continue
+
+                # One tracked hand and optional gesture state must not depend on the other hand.
+                hand_state = event.value.get(f"{prefix}State")
+                if not isinstance(hand_state, dict):
+                    hand_state = {}
+                extract_hand_poses(
+                    hand_data,
+                    getattr(self, f"{prefix}_arm_pose_shared"),
+                    getattr(self, f"{prefix}_hand_position_shared"),
+                    getattr(self, f"{prefix}_hand_orientation_shared"),
+                )
+                extract_hands(hand_state, prefix)
+                updated = True
+            if updated:
+                with self.motion_data_ready_shared.get_lock():
+                    self.motion_data_ready_shared.value = True
 
         except:
             pass
