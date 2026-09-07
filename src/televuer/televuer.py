@@ -140,6 +140,7 @@ class TeleVuer:
         self.right_arm_pose_shared = Array('d', 16, lock=True)
         self.motion_data_ready_shared = Value('b', False, lock=True)
         if self.use_hand_tracking:
+            self.motion_sample_seq_shared = Value('L', 0, lock=True)
             self.left_hand_position_shared = Array('d', 75, lock=True)
             self.right_hand_position_shared = Array('d', 75, lock=True)
             self.left_hand_orientation_shared = Array('d', 25 * 9, lock=True)
@@ -267,8 +268,22 @@ class TeleVuer:
         except:
             pass
 
+    def _begin_motion_sample(self):
+        with self.motion_sample_seq_shared.get_lock():
+            current = self.motion_sample_seq_shared.value
+            # An interrupted handler may have left an uncommitted (odd) sequence.
+            sample_seq = current + 1 if current % 2 == 0 else current + 2
+            self.motion_sample_seq_shared.value = sample_seq
+            return sample_seq
+
+    def _commit_motion_sample(self, sample_seq):
+        with self.motion_sample_seq_shared.get_lock():
+            if self.motion_sample_seq_shared.value == sample_seq:
+                self.motion_sample_seq_shared.value = sample_seq + 1
+
     async def on_hand_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/19_hand_tracking.html"""
+        sample_seq = self._begin_motion_sample()
         try:
             # HandsData
             left_hand_data = event.value["left"]
@@ -312,6 +327,7 @@ class TeleVuer:
             extract_hands(right_hand, "right")
             with self.motion_data_ready_shared.get_lock():
                 self.motion_data_ready_shared.value = True
+            self._commit_motion_sample(sample_seq)
 
         except:
             pass
@@ -874,3 +890,38 @@ class TeleVuer:
         """bool, whether at least one hand or controller motion data event has been received."""
         with self.motion_data_ready_shared.get_lock():
             return self.motion_data_ready_shared.value
+
+    def get_hand_motion_snapshot(self, include_orientations=False, max_attempts=3):
+        """Copy one committed hand update, or return None while a writer is active.
+
+        Head and controller events use separate streams and are not included.
+        """
+        for _ in range(max_attempts):
+            with self.motion_sample_seq_shared.get_lock():
+                seq_before = self.motion_sample_seq_shared.value
+            if seq_before % 2 != 0:
+                continue
+            snapshot = {
+                "left_arm_pose": self.left_arm_pose,
+                "right_arm_pose": self.right_arm_pose,
+                "left_hand_positions": self.left_hand_positions,
+                "right_hand_positions": self.right_hand_positions,
+                "left_hand_pinch": self.left_hand_pinch,
+                "left_hand_pinchValue": self.left_hand_pinchValue,
+                "left_hand_squeeze": self.left_hand_squeeze,
+                "left_hand_squeezeValue": self.left_hand_squeezeValue,
+                "right_hand_pinch": self.right_hand_pinch,
+                "right_hand_pinchValue": self.right_hand_pinchValue,
+                "right_hand_squeeze": self.right_hand_squeeze,
+                "right_hand_squeezeValue": self.right_hand_squeezeValue,
+                "motion_data_ready": self.motion_data_ready,
+                "motion_sample_seq": seq_before,
+            }
+            if include_orientations:
+                snapshot["left_hand_orientations"] = self.left_hand_orientations
+                snapshot["right_hand_orientations"] = self.right_hand_orientations
+            with self.motion_sample_seq_shared.get_lock():
+                seq_after = self.motion_sample_seq_shared.value
+            if seq_before == seq_after and seq_after % 2 == 0:
+                return snapshot
+        return None
