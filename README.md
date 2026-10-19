@@ -209,3 +209,27 @@ please refer to our wiki doc [XR Device](https://github.com/unitreerobotics/xr_t
 ## Notes
 - **Recommended Version**: Use `vuer==0.0.60` for the best functionality and stability.
 - **Black Screen Issue**: On PICO devices, choose the appropriate interaction method (hand gesture or controller) based on the mode to avoid black screen issues.
+
+
+### Hand event freshness
+
+In hand-tracking mode, `TeleVuer.hand_frame_time` and `TeleData.hand_frame_time`
+expose the host `time.monotonic()` receive time of the most recent complete
+`HAND_MOVE` event. The value is `0.0` before the first complete event. Reading
+cached hand positions does not refresh it, and incomplete events do not advance it.
+
+Callers may use it to apply their own timeout policy:
+
+```python
+import time
+
+data = wrapper.get_tele_data()
+hand_events_are_fresh = (
+    data.hand_frame_time > 0.0
+    and 0.0 <= time.monotonic() - data.hand_frame_time <= 0.5
+)
+```
+
+This is an event receive timestamp, not a headset capture timestamp. If a browser
+continues sending cached tracking data as new events, this value alone cannot
+detect that condition. Controller-mode packets retain the default `0.0` value.

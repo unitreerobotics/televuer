@@ -4,6 +4,7 @@ from multiprocessing import Value, Array, Process, shared_memory
 import numpy as np
 import asyncio
 import threading
+import time
 import cv2
 import os
 from pathlib import Path
@@ -139,6 +140,7 @@ class TeleVuer:
         self.left_arm_pose_shared = Array('d', 16, lock=True)
         self.right_arm_pose_shared = Array('d', 16, lock=True)
         self.motion_data_ready_shared = Value('b', False, lock=True)
+        self.hand_frame_time_shared = Value('d', 0.0, lock=True)
         if self.use_hand_tracking:
             self.left_hand_position_shared = Array('d', 75, lock=True)
             self.right_hand_position_shared = Array('d', 75, lock=True)
@@ -312,6 +314,8 @@ class TeleVuer:
             extract_hands(right_hand, "right")
             with self.motion_data_ready_shared.get_lock():
                 self.motion_data_ready_shared.value = True
+            with self.hand_frame_time_shared.get_lock():
+                self.hand_frame_time_shared.value = time.monotonic()
 
         except:
             pass
@@ -700,6 +704,12 @@ class TeleVuer:
             return np.array(self.right_arm_pose_shared[:]).reshape(4, 4, order="F")
 
     # ==================== Hand Tracking Data ====================
+    @property
+    def hand_frame_time(self):
+        """Host monotonic receive time of the last complete HAND_MOVE event, or zero."""
+        with self.hand_frame_time_shared.get_lock():
+            return self.hand_frame_time_shared.value
+
     @property
     def left_hand_positions(self):
         """np.ndarray, shape (25, 3), left hand 25 landmarks' 3D positions."""

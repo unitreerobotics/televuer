@@ -224,6 +224,9 @@ class TeleData:
     right_ctrl_thumbstick: bool = False    # True if thumbstick button is pressed
     right_ctrl_thumbstickValue: np.ndarray = field(default_factory=lambda: np.zeros(2)) # 2D vector (x, y), normalized
 
+    # Appended to preserve the positional order of existing TeleData fields.
+    hand_frame_time: float = 0.0
+
 
 class TeleVuerWrapper:
     def __init__(self, use_hand_tracking: bool, binocular: bool=True, img_shape: tuple=(480, 1280), display_fps: float=30.0,
@@ -287,6 +290,8 @@ class TeleVuerWrapper:
 
         All returned data are transformed from the OpenXR Convention to the (Robot & Unitree) Convention.
         """
+        # Sample before reading points, so a later event cannot make older points look newer.
+        hand_frame_time = getattr(self.tvuer, "hand_frame_time", 0.0)
         # Variable Naming Convention below,
         # ┌────────────┬───────────────────────────┬──────────────────────────────────┬────────────────────────────────────┬────────────────────────────────────┐
         # │left / right│          Bxr              │              Brobot              │               IPxr                 │             IPunitree              │
@@ -401,6 +406,7 @@ class TeleVuerWrapper:
                 right_wrist_pose=right_IPunitree_Brobot_waist_arm,
                 left_hand_pos=left_IPunitree_Brobot_arm_hand_pos,
                 right_hand_pos=right_IPunitree_Brobot_arm_hand_pos,
+                hand_frame_time=hand_frame_time,
                 left_hand_rot=left_Brobot_arm_hand_rot,
                 right_hand_rot=right_Brobot_arm_hand_rot,
                 motion_data_ready=self.tvuer.motion_data_ready,
